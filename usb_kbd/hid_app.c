@@ -1118,18 +1118,23 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
       }
       break;
     case HID_ITF_PROTOCOL_NONE:
-			if (len > 0) {
-				process_gamepad_report(instance, report, len);
-			}
-			break;
-#if 0 // you get to implement it, hoss!
-    case HID_ITF_PROTOCOL_MOUSE:
-        printf("MOUSE len=%d\n", len);
-        if (len >= 6) {
-            process_mouse_report (len, report);
-        }
-        break;
-#endif
+      if (len == 8) {
+        // Standard 8-byte keyboard report (modifier, reserved, 6 keycodes)
+        process_kbd_report ((hid_keyboard_report_t const*) report);
+      } else if (len == 9 && report[0] == 1) {
+        // 8-byte keyboard report with Report ID = 1 prefix
+        process_kbd_report ((hid_keyboard_report_t const*) (report + 1));
+      } else if (len > 0) {
+        process_gamepad_report(instance, report, len);
+      }
+      break;
+    default:
+      if (len == 8) {
+        process_kbd_report ((hid_keyboard_report_t const*) report);
+      } else if (len == 9 && report[0] == 1) {
+        process_kbd_report ((hid_keyboard_report_t const*) (report + 1));
+      }
+      break;
   }
 
   // Ask the device for the next report -- asking for a report is a

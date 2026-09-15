@@ -40,9 +40,13 @@ extern byte *Page[];
 INLINE byte RdZ80(word A) { return(Page[A>>13][A&0x1FFF]); }
 #endif
 #ifdef FMSX
+#include "msxbus.h"
 extern byte *RAM[],PSL[],SSLReg;
 INLINE byte RdZ80(word A)
 {
+  byte slot = PSL[A>>14];
+  if (slot == 1 && g_RealSlot[0]) return MsxBus_Read(RD_SLTSL1, A);
+  if (slot == 2 && g_RealSlot[1]) return MsxBus_Read(RD_SLTSL2, A);
   if(A!=0xFFFF) return(RAM[A>>13][A&0x1FFF]);
   else return((PSL[3]==3)? ~SSLReg:RAM[7][0x1FFF]);
 }

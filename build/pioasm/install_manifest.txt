@@ -1,5 +1,0 @@
-/home/jcher/바탕화면/Pico2MSX/build/pioasm-install/pioasm/pioasm
-/home/jcher/바탕화면/Pico2MSX/build/pioasm-install/pioasm/pioasmTargets.cmake
-/home/jcher/바탕화면/Pico2MSX/build/pioasm-install/pioasm/pioasmTargets-release.cmake
-/home/jcher/바탕화면/Pico2MSX/build/pioasm-install/pioasm/pioasmConfig.cmake
-/home/jcher/바탕화면/Pico2MSX/build/pioasm-install/pioasm/pioasmConfigVersion.cmake

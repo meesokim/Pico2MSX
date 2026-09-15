@@ -36,6 +36,9 @@ static int skip=0;
 
 #include "hdmi_framebuffer.h"
 
+#include "msxbus.h"
+#include "romdump.h"
+
 int main(void) {
 //    vreg_set_voltage(VREG_VOLTAGE_1_05);
 //    set_sys_clock_khz(125000, true);
@@ -47,21 +50,14 @@ int main(void) {
 //    set_sys_clock_khz(225000, truxe);
 //    set_sys_clock_khz(250000, true);
 
-#ifdef HAS_USBPIO
+#if defined(BOARD_WAVESHARE) || !defined(HAS_USBPIO)
+    // 252 MHz sysclk for standard 60Hz DVI (25.2 MHz pixel clock)
+    set_sys_clock_khz(252000, true);
+    *((uint32_t *)(0x40010000+0x58)) = 2 << 16;
+#else
     // PIO USB requires multiple of 48 MHz for USB timing
-    // 240 MHz = 48 MHz * 5 → integer TX divider (5.0) for glitch-free PIO USB
-    //
-    // CRITICAL: display_backend_init in PicoDVI builds MUST NOT change sysclk
-    // afterward, or PIO USB dividers become stale. PicoDVI at 240 MHz bit clock
-    // gives 24 MHz pixel clock (~57 Hz) - most HDMI monitors accept this.
-    // HSTX clock at 240/8 = 30 MHz for HDMI framebuffer builds.
     set_sys_clock_khz(240000, true);
     *((uint32_t *)(0x40010000+0x58)) = 8 << 16; // HSTX clock/8 = 30.0MHz
-#else
-    // For HDMI: sysclk=250MHz, then HSTX gets sysclk/2=125MHz via CLK_HSTX_DIV
-    // This matches the configuration used by all other emulators in this project
-    set_sys_clock_khz(250000, true);
-    *((uint32_t *)(0x40010000+0x58)) = 2 << 16; //CLK_HSTX_DIV = 2 << 16; // HSTX clock/2
 #endif
 
 /*
@@ -75,6 +71,8 @@ int main(void) {
 */
 
      emu_init();
+     MsxBus_Init();
+     g_RealSlot[0] = 1; // Enable Real Cartridge Slot 1
 
 
 
@@ -103,6 +101,12 @@ int main(void) {
     add_repeating_timer_ms(25, repeating_timer_callback, NULL, &timer);
     while (true) {
         uint16_t bClick = emu_DebounceLocalKeys();
+        if (RomDump_IsActive()) {
+            RomDump_HandlePad(bClick);
+            RomDump_Update();
+            tft.waitSync();
+            continue;
+        }
         emu_Input(bClick);
         emu_Step();
     }

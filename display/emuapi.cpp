@@ -22,6 +22,7 @@ extern "C" {
 
 // SD driver config API (to allow runtime SPI instance fallback)
 #include "tf_card.h"
+#include "romdump.h"
 
 #ifdef HAS_USBHOST
 #include <ctype.h>
@@ -1321,19 +1322,24 @@ static void signal_joy (int code, int pressed, int flags) {
 }
 
 void kbd_signal_raw_key (int keycode, int code, int codeshifted, int flags, int pressed) {
-  // Debug logging disabled for production use
-  // Uncomment below for USB keyboard debugging
-/*
-  if (pressed == KEY_PRESSED) {
-    printf("MSX: Key DOWN - keycode=0x%02X code=0x%02X shifted=0x%02X flags=0x%02X\r\n", 
-           keycode, code, codeshifted, flags);
-  } else {
-    printf("MSX: Key UP   - keycode=0x%02X code=0x%02X shifted=0x%02X flags=0x%02X\r\n", 
-           keycode, code, codeshifted, flags);
+  bool alt_held = (flags & (KBD_FLAG_LALT | KBD_FLAG_RALT)) != 0;
+
+  // Check for ALT+D shortcut to toggle ROM dump
+  if (pressed == KEY_PRESSED && alt_held && (code == 'd' || code == 'D' || keycode == 0x07)) {
+    if (!RomDump_IsActive()) {
+      RomDump_Open(0); // Open Slot 1
+    } else {
+      RomDump_ToggleSlot();
+    }
+    return;
   }
-*/
-  
-  //printf("k %d\r\n", keycode); 
+
+  // If ROM Dump is active, delegate all key processing to RomDump
+  if (RomDump_IsActive()) {
+    RomDump_HandleKey(keycode, code, codeshifted, flags, pressed);
+    return;
+  }
+
   // Treat F-keys (F1..F12) as pure keyboard input regardless of joystick mode when not in menu
   bool isFunctionKey = (codeshifted >= KBD_KEY_F1 && codeshifted <= KBD_KEY_F12);
 

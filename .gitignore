@@ -1,0 +1,11 @@
+build/
+build_*/
+*.elf
+*.bin
+*.hex
+*.dis
+*.map
+.vscode/
+.idea/
+*.swp
+*~

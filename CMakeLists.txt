@@ -45,6 +45,8 @@ message(STATUS "PICO_BOARD_HEADER_DIRS=${PICO_BOARD_HEADER_DIRS}")
 # Initialize the Pico SDK
 pico_sdk_init()
 
+add_compile_definitions(PICO_PIO_USE_GPIO_BASE=1)
+
 # Include directories
 include_directories(picomsx)
 include_directories(config)
@@ -55,6 +57,7 @@ include_directories(sd_driver)
 include_directories(psram)
 include_directories(flash)
 include_directories(usb_kbd)
+include_directories(msxbus)
 include_directories(pico-pio-usb/src)
 include_directories(.)
 
@@ -155,6 +158,12 @@ set(FLASH_SOURCES
 	flash/flash_t.c
 )
 
+# MSX Bus sources
+set(MSXBUS_SOURCES
+	msxbus/msxbus.cpp
+	msxbus/romdump.cpp
+)
+
 # Create executable
 add_executable(picomsx
 	${PICOMSX_SOURCES}
@@ -163,6 +172,7 @@ add_executable(picomsx
 	${DISPLAY_SOURCES}
 	${FATSD_SOURCES}
 	${USB_SOURCES}
+	${MSXBUS_SOURCES}
 )
 
 # Ensure header precedence for critical configs
@@ -190,7 +200,8 @@ if(DEFINED DEFAULT_MSX_VERSION)
 	target_compile_definitions(picomsx PRIVATE DEFAULT_MSX_VERSION=${DEFAULT_MSX_VERSION})
 endif()
 
-# Generate PIO header for PSRAM
+# Generate PIO headers
+pico_generate_pio_header(picomsx ${CMAKE_CURRENT_LIST_DIR}/msxbus/msxbus.pio)
 pico_generate_pio_header(picomsx ${CMAKE_CURRENT_LIST_DIR}/psram/psram_spi.pio)
 
 # Add audio libraries from pico-extras

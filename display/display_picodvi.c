@@ -187,20 +187,14 @@ void display_backend_init(uint16_t width, uint16_t height) {
     }
     printf("[PicoDVI] Framebuffer at %p (%zu bytes)\n", framebuffer, fb_size);
 
-    // Use VGA 640x480 timing but with 240 MHz bit clock (~57 Hz refresh).
-    // Most HDMI monitors accept this lower frame rate.
-    static struct dvi_timing dvi_timing_240mhz;
-    memcpy(&dvi_timing_240mhz, &dvi_timing_640x480p_60hz, sizeof(dvi_timing_240mhz));
-    dvi_timing_240mhz.bit_clk_khz = 240000;
-    
     pio_set_gpio_base(DVI_DEFAULT_SERIAL_CONFIG.pio, 16);
     
-    dvi0.timing = &dvi_timing_240mhz;
+    dvi0.timing = &dvi_timing_640x480p_60hz;
     dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;
     dvi0.scanline_callback = core1_scanline_callback;
     dvi_init(&dvi0, next_striped_spin_lock_num(), next_striped_spin_lock_num());
     
-    printf("[PicoDVI] DVI timing: %dx%d @ 60Hz\n",
+    printf("[PicoDVI] DVI timing: %dx%d @ 60Hz (252 MHz)\n",
            dvi0.timing->h_active_pixels,
            dvi0.timing->v_active_lines);
     printf("[PicoDVI] PIO%d TMDS pins: %u,%u,%u CLK:%u invert:%d\n",
@@ -219,16 +213,13 @@ void display_backend_init(uint16_t width, uint16_t height) {
 
     // -----------------------------------------------------------------------
     // HDMI Audio setup
-    // Allocate the DVI audio sample buffer and set 44100 Hz timing constants.
-    // CTS=30000 / N=7056 gives 44100 Hz for 24 MHz pixel clock (240 MHz bit clock).
-    // (For 25.2 MHz pixel clock the standard pair was CTS=28000 / N=6272.)
-    // Matches Sound.c SndRate=44100 (forced in InitSound line 661).
+    // CTS=28000 / N=6272 gives 44100 Hz for 25.2 MHz pixel clock (252 MHz bit clock).
     // -----------------------------------------------------------------------
     memset(audio_buf, 0, sizeof(audio_buf));
     dvi_get_blank_settings(&dvi0)->top    = 0;
     dvi_get_blank_settings(&dvi0)->bottom = 0;
     dvi_audio_sample_buffer_set(&dvi0, audio_buf, AUDIO_BUFFER_SIZE);
-    dvi_set_audio_freq(&dvi0, 44100, 30000, 7056);
+    dvi_set_audio_freq(&dvi0, 44100, 28000, 6272);
     printf("[PicoDVI] HDMI audio enabled: 44100 Hz stereo\n");
 
     // Start Core0 repeating timer that drains snd_ring → DVI audio ring.

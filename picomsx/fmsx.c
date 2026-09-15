@@ -1160,11 +1160,13 @@ void msx_Step(void) {
 
     if (hk >= 1000 && hk <= 1022) {
       switch (hk) {
-        case 1000: KeyMap[8] &= ~0x80; break; // DOWN
-        case 1001: KeyMap[8] &= ~0x40; break; // UP
-        case 1004: KeyMap[8] &= ~0x10; break; // RIGHT
-        case 1005: KeyMap[8] &= ~0x20; break; // LEFT
-        case 1008: KeyMap[7] &= ~0x04; break; // ESC
+        case 1000: KeyMap[8] &= ~0x10; break; // RIGHT (KBD_KEY_RIGHT)
+        case 1001: KeyMap[8] &= ~0x80; break; // DOWN (KBD_KEY_DOWN)
+        case 1004: KeyMap[8] &= ~0x20; break; // LEFT (KBD_KEY_LEFT)
+        case 1005: KeyMap[8] &= ~0x40; break; // UP (KBD_KEY_UP)
+        case 1006: KeyMap[8] &= ~0x02; break; // HOME (KBD_KEY_HOME)
+        case 1007: KeyMap[8] &= ~0x04; break; // END -> DEL
+        case 1008: KeyMap[7] &= ~0x04; break; // ESC (KBD_KEY_ESC)
         case 1011: KeyMap[6] &= ~0x20; break; // F1
         case 1012: KeyMap[6] &= ~0x10; break; // F2
         case 1013: KeyMap[6] &= ~0x08; break; // F3
@@ -1967,6 +1969,8 @@ static void RefreshLineTx80(register byte Y)
 
 
 
+#include "msxbus.h"
+
 /** RdZ80() **************************************************/
 /** Z80 emulation calls this function to read a byte from   **/
 /** address A of Z80 address space. Now moved to Z80.c and  **/
@@ -1974,6 +1978,9 @@ static void RefreshLineTx80(register byte Y)
 /*************************************************************/
 byte RdZ80(word A)
 {
+  byte slot = PSL[A>>14];
+  if (slot == 1 && g_RealSlot[0]) return MsxBus_Read(RD_SLTSL1, A);
+  if (slot == 2 && g_RealSlot[1]) return MsxBus_Read(RD_SLTSL2, A);
   if(A!=0xFFFF) return(RAM[A>>13][A&0x1FFF]);
   else return(PSL[3]==3? ~SSLReg:RAM[7][0x1FFF]);
 }
@@ -1985,6 +1992,15 @@ byte RdZ80(word A)
 /*************************************************************/
 void WrZ80(word A,byte V)
 {
+  byte slot = PSL[A>>14];
+  if (slot == 1 && g_RealSlot[0]) {
+    MsxBus_Write(WR_SLTSL1, A, V);
+    return;
+  }
+  if (slot == 2 && g_RealSlot[1]) {
+    MsxBus_Write(WR_SLTSL2, A, V);
+    return;
+  }
 
   static int wr_log_count = 0;
   (void)wr_log_count;
