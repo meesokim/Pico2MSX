@@ -27,31 +27,35 @@
     pull block                  side SIDE_IDLE
     ; OSR: [7:0]=Low Addr, [15:8]=High Addr, [31:16]=Control mask for GPIO 0-15
 
-    ; 1. Output Low Address (A0-A7) with MODE = 01 (Low Addr)
-    out pins, 8                 side SIDE_LOW_ADDR [4]
+    ; 1. Drive Low Address (A0-A7) onto GPIO 0-7 with MODE = IDLE (setup time ~40ns)
+    out pins, 8                 side SIDE_IDLE [1]
+    ; 2. Assert Low Address Latch (MODE = 01) (pulse width ~80ns)
+    nop                         side SIDE_LOW_ADDR [3]
 
-    ; 2. Output High Address (A8-A15) with MODE = 11 (High Addr)
-    out pins, 8                 side SIDE_HIGH_ADDR [4]
+    ; 3. Drive High Address (A8-A15) onto GPIO 0-7 with MODE = IDLE (setup time ~40ns)
+    out pins, 8                 side SIDE_IDLE [1]
+    ; 4. Assert High Address Latch (MODE = 11) (pulse width ~80ns)
+    nop                         side SIDE_HIGH_ADDR [3]
 
-    ; 3. Simultaneously assert /SLTSL, /RD, /MREQ on GPIO 10-15 and switch MODE to 10 (Data)
+    ; 5. Simultaneously assert /SLTSL, /RD, /MREQ on GPIO 10-15 and switch MODE to 10 (Data)
     out pins, 16                side SIDE_DATA
 
-    ; 4. Float data bus (GPIO 0-7 -> INPUT)
+    ; 6. Float data bus (GPIO 0-7 -> INPUT)
     mov osr, null               side SIDE_DATA
     out pindirs, 8              side SIDE_DATA
 
-    ; 5. Hardware wait until /WAIT (GPIO 16) is HIGH (1 = ready)
+    ; 7. Hardware wait until /WAIT (GPIO 16) is HIGH (1 = ready)
     wait 1 gpio 16              side SIDE_DATA
 
-    ; 6. ROM data settle delay (~300ns)
+    ; 8. ROM data settle delay (~300ns)
     nop [7]                     side SIDE_DATA
     nop [7]                     side SIDE_DATA
 
-    ; 7. Sample 8-bit data from GPIO 0-7 into ISR and push to RX FIFO
+    ; 9. Sample 8-bit data from GPIO 0-7 into ISR and push to RX FIFO
     in pins, 8                  side SIDE_DATA
     push block                  side SIDE_DATA
 
-    ; 8. Deassert all control lines (GPIO 10-15 -> 1) and restore GPIO 0-7 to OUTPUT
+    ; 10. Deassert all control lines (GPIO 10-15 -> 1) and restore GPIO 0-7 to OUTPUT in IDLE
     mov osr, ~null              side SIDE_IDLE
     out pins, 16                side SIDE_IDLE
     mov osr, ~null              side SIDE_IDLE
@@ -68,27 +72,34 @@
     pull block                  side SIDE_IDLE
     ; Word 1: [7:0]=Low Addr, [15:8]=High Addr, [31:16]=Control mask for GPIO 0-15
 
-    ; 1. Output Low Address (A0-A7) with MODE = 01 (Low Addr)
-    out pins, 8                 side SIDE_LOW_ADDR [4]
+    ; 1. Drive Low Address (A0-A7) onto GPIO 0-7 with MODE = IDLE (setup time ~40ns)
+    out pins, 8                 side SIDE_IDLE [1]
+    ; 2. Assert Low Address Latch (MODE = 01) (pulse width ~80ns)
+    nop                         side SIDE_LOW_ADDR [3]
 
-    ; 2. Output High Address (A8-A15) with MODE = 11 (High Addr)
-    out pins, 8                 side SIDE_HIGH_ADDR [4]
+    ; 3. Drive High Address (A8-A15) onto GPIO 0-7 with MODE = IDLE (setup time ~40ns)
+    out pins, 8                 side SIDE_IDLE [1]
+    ; 4. Assert High Address Latch (MODE = 11) (pulse width ~80ns)
+    nop                         side SIDE_HIGH_ADDR [3]
 
-    ; 3. Simultaneously assert /SLTSL, /WR, /MREQ on GPIO 10-15 and switch MODE to 10 (Data)
-    out pins, 16                side SIDE_DATA
+    ; 5. Simultaneously assert /SLTSL, /WR, /MREQ on GPIO 10-15
+    out pins, 16                side SIDE_IDLE
 
-    ; 4. Pull Word 2 (Data byte D0-D7) and output to GPIO 0-7
-    pull block                  side SIDE_DATA
-    out pins, 8                 side SIDE_DATA [4]
+    ; 6. Pull Word 2 (Data byte D0-D7), drive to GPIO 0-7 in IDLE (setup time ~40ns)
+    pull block                  side SIDE_IDLE
+    out pins, 8                 side SIDE_IDLE [1]
 
-    ; 5. Hardware wait until /WAIT (GPIO 16) is HIGH (1 = ready)
+    ; 7. Switch MODE to 10 (Data)
+    nop                         side SIDE_DATA
+
+    ; 8. Hardware wait until /WAIT (GPIO 16) is HIGH (1 = ready)
     wait 1 gpio 16              side SIDE_DATA
 
-    ; 6. Data hold delay
+    ; 9. Data hold delay
     nop [7]                     side SIDE_DATA
     nop [7]                     side SIDE_DATA
 
-    ; 7. Deassert all control lines (GPIO 10-15 -> 1) and restore MODE to IDLE (11)
+    ; 10. Deassert all control lines (GPIO 10-15 -> 1) and restore MODE to IDLE (00)
     mov osr, ~null              side SIDE_IDLE
     out pins, 16                side SIDE_IDLE [2]
 .wrap
