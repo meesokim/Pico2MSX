@@ -2,10 +2,8 @@
  * Real MSX Cartridge Bus Implementation for Raspberry Pi Pico 2 (RP2350).
  *
  * Hardware Profiles:
- *   MsxBusHwGpio   — Blueberry GPIO Board (2 Slots, 100% Direct PIO Engine:
- *                    Direct GPIO 0-15 pin control, Side-Set MODE 01/11/10,
- *                    Simultaneous /SLTSL1, /SLTSL2, /RD, /WR, /MREQ, /IORQ direct drive,
- *                    and Hardware /WAIT Synchronization) - Default
+ *   MsxBusHwGpio   — Blueberry GPIO Board (2 slots, single PIO SM:
+ *                    GPIO 0-15 + side-set MODE 01/11/10, hardware /WAIT) - Default
  *   MsxBusHwZemmix — Zemmix Mini / MSX-Pi / RPMP2 40-Pin Latch Board
  */
 
@@ -57,17 +55,14 @@ static inline void PULSE_PIN(uint32_t pin) {
 }
 
 /* ==============================================================================
- * Blueberry GPIO Board (2 Slots) — 100% Direct PIO Engine (Default)
+ * Blueberry GPIO Board (2 Slots) — single PIO SM (Default)
  * ==============================================================================
  * Direct PIO Pin Mapping (GPIO 0-16):
  *   GPIO 0-7   : Data / Address Multiplexed Bus (PIO OUT / IN)
- *   GPIO 8     : MODE0 (Low bit of MODE)        (PIO Side-Set bit 0)
- *   GPIO 9     : MODE1 (High bit of MODE)       (PIO Side-Set bit 1)
- *                MODE Encoding via Side-Set:
- *                  01 (MODE1=0, MODE0=1) : Low Address  (A0-A7)
- *                  11 (MODE1=1, MODE0=1) : High Address (A8-A15)
- *                  10 (MODE1=1, MODE0=0) : Data         (D0-D7)
- *                  00 (MODE1=0, MODE0=0) : Idle
+ *   GPIO 8     : MODE0 (2-to-4 selector LSB, PIO Side-Set bit 0)
+ *   GPIO 9     : MODE1 (2-to-4 selector MSB, PIO Side-Set bit 1)
+ *                00 Idle / 01 A0-A7 / 11 A8-A15 / 10 Data
+ *                Each selector channel drives the matching 74HC373 LE.
  *   GPIO 10    : /MREQ    (Active LOW, Memory Request)      -> Directly driven by PIO
  *   GPIO 11    : /IORQ    (Active LOW, I/O Request)         -> Directly driven by PIO
  *   GPIO 12    : /RD      (Active LOW, Memory / IO Read)    -> Directly driven by PIO
@@ -88,20 +83,23 @@ namespace GpioHw {
     #define CTRL_IDLE_BITS  (0xFC00u) // GPIO 10-15 all HIGH (1111 1100 0000 0000)
 
     static PIO  s_pio = pio2;
-    static uint s_sm_read  = 1;  // sm0 is used by PSRAM
-    static uint s_sm_write = 2;
+    static uint s_sm     = 1;  /* pio2 SM0 is PSRAM SPI */
+    static uint s_offset = 0;
+    static bool s_pio_loaded = false;
 
-    static uint s_offset_read  = 0;
-    static uint s_offset_write = 0;
-    static bool s_pio_loaded   = false;
+    static uint32_t PackTx(uint16_t addr, uint32_t ctrl, uint8_t data) {
+        return (uint32_t)addr | ((ctrl | (uint32_t)data) << 16);
+    }
+
+    static void ExecEntry(uint entry) {
+        msxbus_pio_exec_entry(s_pio, s_sm, s_offset, entry);
+    }
 
     static void Init(void) {
-        // 1. Reset pin (GPIO 24)
         gpio_init(24);
         gpio_set_dir(24, GPIO_OUT);
         gpio_put(24, 1);
 
-        // 2. Input pins: WAIT (16), INT (17)
         gpio_init(16);
         gpio_set_dir(16, GPIO_IN);
         gpio_pull_up(16);
@@ -110,18 +108,16 @@ namespace GpioHw {
         gpio_set_dir(17, GPIO_IN);
         gpio_pull_up(17);
 
-        // 3. Load and initialize PIO state machines controlling GPIO 0-15 directly
         if (!s_pio_loaded) {
-            s_offset_read  = pio_add_program(s_pio, &msxbus_read_program);
-            s_offset_write = pio_add_program(s_pio, &msxbus_write_program);
-            s_pio_loaded   = true;
+            pio_sm_claim(s_pio, s_sm);
+            s_offset = pio_add_program(s_pio, &msxbus_program);
+            s_pio_loaded = true;
         }
 
-        msxbus_pio_read_init(s_pio, s_sm_read, s_offset_read);
-        msxbus_pio_write_init(s_pio, s_sm_write, s_offset_write);
+        msxbus_pio_init(s_pio, s_sm, s_offset);
 
-        printf("[MsxBus] Hardware: Direct PIO Engine (PIO2 SM%u/SM%u, Direct GPIO 0-15 + SideSet MODE 01/11/10 + HW /WAIT)\n",
-               s_sm_read, s_sm_write);
+        printf("[MsxBus] Hardware: PIO2 SM%u 2-to-4 MODE 01/11/10, 74HC373 (GPIO 0-15)\n",
+               s_sm);
     }
 
     static inline uint32_t GetReadCtrlMask(int cmd) {
@@ -170,36 +166,40 @@ namespace GpioHw {
         return ctrl;
     }
 
+    static void DataBusHiZ(bool enable) {
+        for (uint i = 0; i < 8; i++) {
+            if (enable) {
+                gpio_set_oeover(i, GPIO_OVERRIDE_LOW);
+                gpio_set_input_enabled(i, true);
+                gpio_disable_pulls(i);
+            } else {
+                gpio_set_oeover(i, GPIO_OVERRIDE_NORMAL);
+            }
+        }
+    }
+
     static uint8_t ReadRaw(int cmd, uint16_t addr) {
-        if (addr > 0xC000) return 0xFF;
-
         uint32_t ctrl = GetReadCtrlMask(cmd);
-
-        // Send 32-bit transaction word to Pure PIO Read Engine:
-        // [7:0]=Low Addr, [15:8]=High Addr, [31:16]=Direct GPIO 0-15 pin states
-        uint32_t tx_val = (uint32_t)(addr & 0xFFFFu) | (ctrl << 16);
-        pio_sm_put_blocking(s_pio, s_sm_read, tx_val);
-
-        // PIO directly executes:
-        //   1. Low Addr (A0-A7) with MODE 01 (100ns)
-        //   2. High Addr (A8-A15) with MODE 11 (100ns)
-        //   3. Directly drives GPIO 10-15 (/SLTSL, /RD, /MREQ) with MODE 10 (Data)
-        //   4. Floats GPIO 0-7 to INPUT
-        //   5. Directly waits for /WAIT (GPIO 16) == HIGH
-        //   6. Settle delay and samples data bus -> RX FIFO
-        //   7. Directly restores GPIO 10-15 to HIGH (Idle) and GPIO 0-7 to OUTPUT
-        return (uint8_t)(pio_sm_get_blocking(s_pio, s_sm_read) & 0xFFu);
+        ExecEntry(msxbus_offset_entry_read);
+        pio_sm_put_blocking(s_pio, s_sm, PackTx(addr, ctrl, 0));
+        (void)pio_sm_get_blocking(s_pio, s_sm); /* address latched */
+        DataBusHiZ(true);
+        pio_sm_put_blocking(s_pio, s_sm, 0); /* /RD, MODE=10 data */
+        (void)pio_sm_get_blocking(s_pio, s_sm); /* control held */
+        DELAY_NOPS(40);
+        gpio_barrier();
+        uint8_t data = (uint8_t)(SIO_GPIO_IN() & 0xFFu);
+        pio_sm_put_blocking(s_pio, s_sm, 0); /* restore */
+        msxbus_pio_wait_pull(s_pio, s_sm, s_offset);
+        DataBusHiZ(false);
+        return data;
     }
 
     static void Write(int cmd, uint16_t addr, uint8_t value) {
-        if (addr > 0xC000) return;
-
         uint32_t ctrl = GetWriteCtrlMask(cmd);
-
-        // Send Word 1 (Addr + Control mask) and Word 2 (Data byte) to PIO Write Engine
-        uint32_t tx_val = (uint32_t)(addr & 0xFFFFu) | (ctrl << 16);
-        pio_sm_put_blocking(s_pio, s_sm_write, tx_val);
-        pio_sm_put_blocking(s_pio, s_sm_write, (uint32_t)value & 0xFFu);
+        ExecEntry(msxbus_offset_entry_write);
+        pio_sm_put_blocking(s_pio, s_sm, PackTx(addr, ctrl, value));
+        msxbus_pio_wait_pull(s_pio, s_sm, s_offset);
     }
 
     static void Reset(int ms) {

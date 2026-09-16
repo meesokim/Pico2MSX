@@ -1,159 +1,108 @@
 ;
-; MSX Cartridge Bus Pure PIO Engine for Waveshare RP2350-PiZero
+; MSX Cartridge Bus — single PIO SM, separate read/write entry points
 ;
-; Fully hardware-timed MSX Bus Engine:
-;   - Address Latch with 2-bit Side-Set on GPIO 8 (MODE0) and GPIO 9 (MODE1)
-;     01 (MODE1=0, MODE0=1) : Low Address  (A0-A7)
-;     11 (MODE1=1, MODE0=1) : High Address (A8-A15)
-;     10 (MODE1=1, MODE0=0) : Data         (D0-D7)
-;     00 (MODE1=0, MODE0=0) : Idle
-;   - Simultaneous Control assertion (/RD, /WR, /MREQ, /IORQ, /SLTSL1, /SLTSL2) on GPIO 10-15
-;   - Hardware /WAIT (GPIO 16) synchronization
-;   - Atomic data sampling and bus restore
+; Fits in remaining PIO2 slots next to PSRAM SPI (~10 instr). Length = 22.
+;
+; Side-set GPIO8=MODE0, GPIO9=MODE1 into a 2-to-4 selector. The selector
+; steers GPIO 0-7 and the 74HC373 LE of each latch:
+;   00  Idle
+;   01  Low address  (A0-A7)   — 373_low transparent
+;   11  High address (A8-A15)  — leaving 01 latches A0-A7; 373_high transparent
+;   10  Data         (D0-D7)   — leaving 11 latches A8-A15
+;
+; Put A_high only AFTER selecting 11. Do not float GPIO 0-7 while still on 11
+; (high 373 would follow a floating D). Switch 11→10 first, then Hi-Z.
+;
+; TX word (shift-right, LSB first):
+;   [7:0]   A0-A7
+;   [15:8]  A8-A15
+;   [31:16] GPIO 0-15 OUT image (data in [7:0], control in [15:10])
+;
+; CPU: wait until PC is at `common` (pull), exec jmp to entry_read/entry_write, then put.
+; Wrap returns to entry_read (set X=0, pull). Do not use pio_sm_is_exec_stalled —
+; that flag only tracks instructions written via SM_INSTR, not a program pull.
 ;
 
-.define public SIDE_LOW_ADDR   0b01  ; MODE1=0, MODE0=1 (Low Address A0-A7)
-.define public SIDE_HIGH_ADDR  0b11  ; MODE1=1, MODE0=1 (High Address A8-A15)
-.define public SIDE_DATA       0b10  ; MODE1=1, MODE0=0 (Data D0-D7)
-.define public SIDE_IDLE       0b00  ; MODE1=0, MODE0=0 (Idle state)
+.define public SIDE_IDLE       0b00
+.define public SIDE_LOW_ADDR   0b01
+.define public SIDE_DATA       0b10
+.define public SIDE_HIGH_ADDR  0b11
 
-; ------------------------------------------------------------------------------
-; 1. Pure PIO Read Engine: Address -> Control (/SLTSL,/RD,/MREQ) -> /WAIT -> Data Read
-; ------------------------------------------------------------------------------
-.program msxbus_read
+.program msxbus
 .side_set 2
 
 .wrap_target
+public entry_read:
+    set x, 0                    side SIDE_IDLE
+    jmp common                  side SIDE_IDLE
+public entry_write:
+    set x, 1                    side SIDE_IDLE
+public common:
     pull block                  side SIDE_IDLE
-    ; OSR: [7:0]=Low Addr, [15:8]=High Addr, [31:16]=Control mask for GPIO 0-15
-
-    ; 1. Drive Low Address (A0-A7) onto GPIO 0-7 with MODE = IDLE (setup time ~40ns)
     out pins, 8                 side SIDE_IDLE [1]
-    ; 2. Assert Low Address Latch (MODE = 01) (pulse width ~80ns)
     nop                         side SIDE_LOW_ADDR [3]
-
-    ; 3. Drive High Address (A8-A15) onto GPIO 0-7 maintaining MODE = 01 (Low Addr) (setup time ~40ns)
-    out pins, 8                 side SIDE_LOW_ADDR [1]
-    ; 4. Assert High Address Latch (MODE = 11) (pulse width ~80ns)
+    out pins, 8                 side SIDE_HIGH_ADDR [1]
     nop                         side SIDE_HIGH_ADDR [3]
-
-    ; 5. Simultaneously assert /SLTSL, /RD, /MREQ on GPIO 10-15 and switch MODE to 10 (Data)
-    out pins, 16                side SIDE_DATA
-
-    ; 6. Float data bus (GPIO 0-7 -> INPUT)
-    mov osr, null               side SIDE_DATA
-    out pindirs, 8              side SIDE_DATA
-
-    ; 7. Hardware wait until /WAIT (GPIO 16) is HIGH (1 = ready)
-    wait 1 gpio 16              side SIDE_DATA
-
-    ; 8. ROM data settle delay (~300ns)
-    nop [7]                     side SIDE_DATA
-    nop [7]                     side SIDE_DATA
-
-    ; 9. Sample 8-bit data from GPIO 0-7 into ISR and push to RX FIFO
-    in pins, 8                  side SIDE_DATA
+    mov y, osr                  side SIDE_HIGH_ADDR
+    jmp !x, do_read             side SIDE_HIGH_ADDR
+    out pins, 16                side SIDE_DATA [7]
+    nop                         side SIDE_DATA [7]
+    jmp restore                 side SIDE_IDLE
+do_read:
+    ; 11→10 latches A8-A15, then CPU Hi-Z, then /RD held for SIO sample.
     push block                  side SIDE_DATA
-
-    ; 10. Deassert all control lines (GPIO 10-15 -> 1) and restore GPIO 0-7 to OUTPUT in IDLE
+    pull block                  side SIDE_DATA
+    mov osr, y                  side SIDE_DATA
+    out pins, 16                side SIDE_DATA [7]
+    push block                  side SIDE_DATA
+    pull block                  side SIDE_DATA
+restore:
     mov osr, ~null              side SIDE_IDLE
     out pins, 16                side SIDE_IDLE
-    mov osr, ~null              side SIDE_IDLE
     out pindirs, 8              side SIDE_IDLE [2]
-.wrap
-
-; ------------------------------------------------------------------------------
-; 2. Pure PIO Write Engine: Address -> Control (/SLTSL,/WR,/MREQ) -> Data Out -> /WAIT
-; ------------------------------------------------------------------------------
-.program msxbus_write
-.side_set 2
-
-.wrap_target
-    pull block                  side SIDE_IDLE
-    ; Word 1: [7:0]=Low Addr, [15:8]=High Addr, [31:16]=Control mask for GPIO 0-15
-
-    ; 1. Drive Low Address (A0-A7) onto GPIO 0-7 with MODE = IDLE (setup time ~40ns)
-    out pins, 8                 side SIDE_IDLE [1]
-    ; 2. Assert Low Address Latch (MODE = 01) (pulse width ~80ns)
-    nop                         side SIDE_LOW_ADDR [3]
-
-    ; 3. Drive High Address (A8-A15) onto GPIO 0-7 maintaining MODE = 01 (Low Addr) (setup time ~40ns)
-    out pins, 8                 side SIDE_LOW_ADDR [1]
-    ; 4. Assert High Address Latch (MODE = 11) (pulse width ~80ns)
-    nop                         side SIDE_HIGH_ADDR [3]
-
-    ; 5. Simultaneously assert /SLTSL, /WR, /MREQ on GPIO 10-15
-    out pins, 16                side SIDE_HIGH_ADDR
-
-    ; 6. Pull Word 2 (Data byte D0-D7), drive to GPIO 0-7 maintaining High Addr (setup time ~40ns)
-    pull block                  side SIDE_HIGH_ADDR
-    out pins, 8                 side SIDE_HIGH_ADDR [1]
-
-    ; 7. Switch MODE to 10 (Data)
-    nop                         side SIDE_DATA
-
-    ; 8. Hardware wait until /WAIT (GPIO 16) is HIGH (1 = ready)
-    wait 1 gpio 16              side SIDE_DATA
-
-    ; 9. Data hold delay
-    nop [7]                     side SIDE_DATA
-    nop [7]                     side SIDE_DATA
-
-    ; 10. Deassert all control lines (GPIO 10-15 -> 1) and restore MODE to IDLE (00)
-    mov osr, ~null              side SIDE_IDLE
-    out pins, 16                side SIDE_IDLE [2]
 .wrap
 
 % c-sdk {
 #include "hardware/clocks.h"
 #include "hardware/pio.h"
+#include "hardware/gpio.h"
 
-static inline void msxbus_pio_read_init(PIO pio, uint sm, uint offset) {
-    pio_sm_config c = msxbus_read_program_get_default_config(offset);
+static inline void msxbus_pio_init(PIO pio, uint sm, uint offset) {
+    pio_sm_config c = msxbus_program_get_default_config(offset);
 
-    // OUT pins: GPIO 0-15 (0-7: Data/Addr, 8-9: Side-set, 10-15: Controls)
     sm_config_set_out_pins(&c, 0, 16);
-    // IN pins: GPIO 0-7 (Data read)
     sm_config_set_in_pins(&c, 0);
-    // SIDESET pins: GPIO 8 (MODE0), GPIO 9 (MODE1)
     sm_config_set_sideset_pins(&c, 8);
 
     for (uint i = 0; i <= 15; i++) {
         pio_gpio_init(pio, i);
+        gpio_set_pulls(i, false, false);
     }
 
-    pio_sm_set_consecutive_pindirs(pio, sm, 0, 16, true);
-
     sm_config_set_out_shift(&c, true, false, 32);
-    sm_config_set_in_shift(&c, true, false, 8);
+    sm_config_set_in_shift(&c, false, true, 8);
+    sm_config_set_in_pin_count(&c, 8);
 
-    float div = (float)clock_get_hz(clk_sys) / 50000000.0f; // ~50 MHz
+    /* ~20 MHz: 8-cycle [7] delay ≈ 400 ns ROM tACC after /RD. */
+    float div = (float)clock_get_hz(clk_sys) / 20000000.0f;
     if (div < 1.0f) div = 1.0f;
     sm_config_set_clkdiv(&c, div);
 
     pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_consecutive_pindirs(pio, sm, 0, 16, true);
+    pio_sm_set_pins_with_mask(pio, sm, 0xFC00u, 0xFFFFu);
     pio_sm_set_enabled(pio, sm, true);
 }
 
-static inline void msxbus_pio_write_init(PIO pio, uint sm, uint offset) {
-    pio_sm_config c = msxbus_write_program_get_default_config(offset);
-
-    sm_config_set_out_pins(&c, 0, 16);
-    sm_config_set_sideset_pins(&c, 8);
-
-    for (uint i = 0; i <= 15; i++) {
-        pio_gpio_init(pio, i);
+static inline void msxbus_pio_wait_pull(PIO pio, uint sm, uint offset) {
+    const uint pull_pc = offset + msxbus_offset_common;
+    while (pio_sm_get_pc(pio, sm) != pull_pc) {
+        tight_loop_contents();
     }
+}
 
-    pio_sm_set_consecutive_pindirs(pio, sm, 0, 16, true);
-
-    sm_config_set_out_shift(&c, true, false, 32);
-
-    float div = (float)clock_get_hz(clk_sys) / 50000000.0f; // ~50 MHz
-    if (div < 1.0f) div = 1.0f;
-    sm_config_set_clkdiv(&c, div);
-
-    pio_sm_init(pio, sm, offset, &c);
-    pio_sm_set_enabled(pio, sm, true);
+static inline void msxbus_pio_exec_entry(PIO pio, uint sm, uint offset, uint entry) {
+    msxbus_pio_wait_pull(pio, sm, offset);
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + entry));
 }
 %}
