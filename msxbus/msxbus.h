@@ -1,9 +1,9 @@
 /**
- * Real MSX cartridge bus over Raspberry Pi RP2350 PIO (GPIO MODE board)
- * and SIO (Zemmix latch board).
+ * Real MSX cartridge bus over Raspberry Pi RP2350 SIO
+ * (GPIO MODE board and Zemmix latch board).
  *
  * Hardware Profiles:
- *   MsxBusHwGpio   — Blueberry GPIO Board (2 slots, single PIO SM) - Default
+ *   MsxBusHwGpio   — Blueberry GPIO Board (SIO, 74HC139+374, LVC4245) - Default
  *   MsxBusHwZemmix — Zemmix Mini / MSX-Pi / RPMP2 40-Pin Latch Board
  */
 #ifndef MSXBUS_H
@@ -30,7 +30,7 @@ extern "C" {
 #define RESET_CMD 0x40
 
 typedef enum {
-    MsxBusHwGpio   = 0,  /* Blueberry GPIO Board (2-to-4 MODE: 01=A_low, 11=A_high, 10=Data) */
+    MsxBusHwGpio   = 0,  /* Blueberry GPIO: SIO 74HC139+374, LVC4245 */
     MsxBusHwZemmix = 1   /* Zemmix Mini 1-Slot Latch Board */
 } MsxBusHardware;
 

@@ -201,7 +201,6 @@ if(DEFINED DEFAULT_MSX_VERSION)
 endif()
 
 # Generate PIO headers
-pico_generate_pio_header(picomsx ${CMAKE_CURRENT_LIST_DIR}/msxbus/msxbus.pio)
 pico_generate_pio_header(picomsx ${CMAKE_CURRENT_LIST_DIR}/psram/psram_spi.pio)
 
 # Add audio libraries from pico-extras

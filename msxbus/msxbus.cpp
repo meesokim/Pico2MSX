@@ -2,8 +2,7 @@
  * Real MSX Cartridge Bus Implementation for Raspberry Pi Pico 2 (RP2350).
  *
  * Hardware Profiles:
- *   MsxBusHwGpio   — Blueberry GPIO Board (2 slots, single PIO SM:
- *                    GPIO 0-15 + side-set MODE 01/11/10, hardware /WAIT) - Default
+ *   MsxBusHwGpio   — Blueberry GPIO Board (SIO, 74HC139+374, LVC4245) - Default
  *   MsxBusHwZemmix — Zemmix Mini / MSX-Pi / RPMP2 40-Pin Latch Board
  */
 
@@ -11,9 +10,7 @@
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 #include "hardware/sync.h"
-#include "hardware/pio.h"
 #include "hardware/structs/sio.h"
-#include "msxbus.pio.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -42,9 +39,11 @@ static inline void DELAY_NOPS(int n) {
     }
 }
 
+#define SYNC_NOPS_GPIO    80
 #define SYNC_NOPS_ZEMMIX  80
 #define WAIT_TIMEOUT      50
 #define PULSE_HIGH_NOPS   16
+#define LATCH_NOPS        8
 
 static inline void PULSE_PIN(uint32_t pin) {
     SIO_GPIO_CLR(pin);
@@ -54,51 +53,108 @@ static inline void PULSE_PIN(uint32_t pin) {
     gpio_barrier();
 }
 
+#ifndef BOARD_WAVESHARE
+#define BOARD_WAVESHARE
+#endif
+
 /* ==============================================================================
- * Blueberry GPIO Board (2 Slots) — single PIO SM (Default)
+ * Blueberry GPIO Board (2 Slots) — ARM SIO (Default)
  * ==============================================================================
- * Direct PIO Pin Mapping (GPIO 0-16):
- *   GPIO 0-7   : Data / Address Multiplexed Bus (PIO OUT / IN)
- *   GPIO 8     : MODE0 (2-to-4 selector LSB, PIO Side-Set bit 0)
- *   GPIO 9     : MODE1 (2-to-4 selector MSB, PIO Side-Set bit 1)
- *                00 Idle / 01 A0-A7 / 11 A8-A15 / 10 Data
- *                Each selector channel drives the matching 74HC373 LE.
- *   GPIO 10    : /MREQ    (Active LOW, Memory Request)      -> Directly driven by PIO
- *   GPIO 11    : /IORQ    (Active LOW, I/O Request)         -> Directly driven by PIO
- *   GPIO 12    : /RD      (Active LOW, Memory / IO Read)    -> Directly driven by PIO
- *   GPIO 13    : /WR      (Active LOW, Memory / IO Write)   -> Directly driven by PIO
- *   GPIO 14    : /SLTSL1  (Active LOW, Slot 1 Select)       -> Directly driven by PIO
- *   GPIO 15    : /SLTSL2  (Active LOW, Slot 2 Select)       -> Directly driven by PIO
- *   GPIO 16    : /WAIT    (MSX Wait in, Active LOW, Pull-up) -> Directly monitored by PIO 'wait 1 gpio 16'
- *   GPIO 17    : /INT     (MSX Interrupt in, Active LOW, Pull-up)
- *   GPIO 24    : /RESET   (MSX Reset out, Active LOW)
+ *   GPIO 0-7   : multiplexed A/D (74HC374 D + LVC4245 B)
+ *   GPIO 8     : MODE0 = 74HC139 1A
+ *   GPIO 9     : MODE1 = 74HC139 1B
+ *                139 Y is active-low; 74HC374 clocks on the rising edge:
+ *                  00→01 latch A0-A7 / 01→11 latch A8-A15 / 10 = 4245 /OE
+ *                LVC4245 DIR = /WR: 1=Pico→cart, 0=cart→Pico
+ *   Waveshare RP2350-PiZero header vs Raspberry Pi (physical pads):
+ *     MODE1 GPIO12, /MREQ GPIO11, /IORQ GPIO10, /RD GPIO9,
+ *     /SLTSL1 GPIO4, /SLTSL2 GPIO5. Data D4/D5 sit on GPIO14/15.
  * ============================================================================== */
 namespace GpioHw {
-    #define PIN_MREQ_BIT    (1u << 10)
-    #define PIN_IORQ_BIT    (1u << 11)
-    #define PIN_RD_BIT      (1u << 12)
-    #define PIN_WR_BIT      (1u << 13)
-    #define PIN_SLTSL1_BIT  (1u << 14)
-    #define PIN_SLTSL2_BIT  (1u << 15)
-    #define CTRL_IDLE_BITS  (0xFC00u) // GPIO 10-15 all HIGH (1111 1100 0000 0000)
+#if defined(BOARD_WAVESHARE)
+    #define PIN_DATA        0x0000C0CFu /* GPIO 0-3,6,7,14,15 */
+    #define PIN_MODE0       (1u << 8)
+    #define PIN_MODE1       (1u << 12)
+    #define PIN_MREQ        (1u << 11)
+    #define PIN_IORQ        (1u << 10)
+    #define PIN_RD          (1u << 9)
+    #define PIN_WR          (1u << 13)
+    #define PIN_SLTSL1      (1u << 4)
+    #define PIN_SLTSL2      (1u << 5)
+#else
+    #define PIN_DATA        0x000000FFu
+    #define PIN_MODE0       (1u << 8)
+    #define PIN_MODE1       (1u << 9)
+    #define PIN_MREQ        (1u << 10)
+    #define PIN_IORQ        (1u << 11)
+    #define PIN_RD          (1u << 12)
+    #define PIN_WR          (1u << 13)
+    #define PIN_SLTSL1      (1u << 14)
+    #define PIN_SLTSL2      (1u << 15)
+#endif
+    #define PIN_MODE        (PIN_MODE0 | PIN_MODE1)
+    #define PIN_WAIT        (1u << 16)
+    #define PIN_RESET       (1u << 24)
+    #define CTRL_IDLE       (PIN_MREQ | PIN_IORQ | PIN_RD | PIN_WR | PIN_SLTSL1 | PIN_SLTSL2)
 
-    static PIO  s_pio = pio2;
-    static uint s_sm     = 1;  /* pio2 SM0 is PSRAM SPI */
-    static uint s_offset = 0;
-    static bool s_pio_loaded = false;
-
-    static uint32_t PackTx(uint16_t addr, uint32_t ctrl, uint8_t data) {
-        return (uint32_t)addr | ((ctrl | (uint32_t)data) << 16);
+    /* Shuffle D4/D5 onto GPIO14/15 (Waveshare). Control pins are already remapped above. */
+    static inline uint32_t DataHw(uint8_t v) {
+#if defined(BOARD_WAVESHARE)
+        uint32_t m = (uint32_t)(v & 0xCFu);
+        if (v & 0x10u) m |= (1u << 14);
+        if (v & 0x20u) m |= (1u << 15);
+        return m;
+#else
+        return (uint32_t)v;
+#endif
     }
 
-    static void ExecEntry(uint entry) {
-        msxbus_pio_exec_entry(s_pio, s_sm, s_offset, entry);
+    static inline uint8_t DataPi(uint32_t gpio_in) {
+#if defined(BOARD_WAVESHARE)
+        uint8_t v = (uint8_t)(gpio_in & 0xCFu);
+        if (gpio_in & (1u << 14)) v |= 0x10u;
+        if (gpio_in & (1u << 15)) v |= 0x20u;
+        return v;
+#else
+        return (uint8_t)(gpio_in & 0xFFu);
+#endif
+    }
+
+    static inline void SYNC(void) {
+        DELAY_NOPS(SYNC_NOPS_GPIO);
+        gpio_barrier();
+    }
+
+    static inline void WaitReady(void) {
+        int timeout = WAIT_TIMEOUT;
+        while (!(SIO_GPIO_IN() & PIN_WAIT) && --timeout > 0) {
+            gpio_barrier();
+        }
+    }
+
+    static void SetAddress(uint16_t addr) {
+        SIO_GPIO_OE_SET(PIN_DATA | PIN_MODE | CTRL_IDLE);
+        SIO_GPIO_CLR(PIN_DATA | PIN_MODE);
+        gpio_barrier();
+        SIO_GPIO_SET(DataHw((uint8_t)addr));
+        DELAY_NOPS(LATCH_NOPS);
+        SIO_GPIO_SET(PIN_MODE0);
+        DELAY_NOPS(LATCH_NOPS);
+        SIO_GPIO_CLR(PIN_DATA);
+        SIO_GPIO_SET(DataHw((uint8_t)(addr >> 8)));
+        DELAY_NOPS(LATCH_NOPS);
+        SIO_GPIO_SET(PIN_MODE1);
+        DELAY_NOPS(LATCH_NOPS);
+        gpio_barrier();
     }
 
     static void Init(void) {
-        gpio_init(24);
-        gpio_set_dir(24, GPIO_OUT);
-        gpio_put(24, 1);
+        for (uint i = 0; i <= 15; i++) {
+            gpio_init(i);
+            gpio_set_dir(i, GPIO_OUT);
+            gpio_disable_pulls(i);
+            gpio_set_input_enabled(i, true);
+        }
 
         gpio_init(16);
         gpio_set_dir(16, GPIO_IN);
@@ -108,98 +164,77 @@ namespace GpioHw {
         gpio_set_dir(17, GPIO_IN);
         gpio_pull_up(17);
 
-        if (!s_pio_loaded) {
-            pio_sm_claim(s_pio, s_sm);
-            s_offset = pio_add_program(s_pio, &msxbus_program);
-            s_pio_loaded = true;
-        }
+        gpio_init(24);
+        gpio_set_dir(24, GPIO_OUT);
+        gpio_put(24, 1);
 
-        msxbus_pio_init(s_pio, s_sm, s_offset);
+        SIO_GPIO_OE_SET(PIN_DATA | PIN_MODE | CTRL_IDLE | PIN_RESET);
+        SIO_GPIO_CLR(PIN_DATA);
+        SIO_GPIO_SET(PIN_MODE | CTRL_IDLE | PIN_RESET);
+        gpio_barrier();
 
-        printf("[MsxBus] Hardware: PIO2 SM%u 2-to-4 MODE 01/11/10, 74HC373 (GPIO 0-15)\n",
-               s_sm);
-    }
-
-    static inline uint32_t GetReadCtrlMask(int cmd) {
-        uint32_t ctrl = CTRL_IDLE_BITS;
-        switch (cmd) {
-            case RD_SLTSL1:
-                // Direct PIO control: /SLTSL1=0, /RD=0, /MREQ=0 (Slot 2 remains 1 / inactive)
-                ctrl &= ~(PIN_SLTSL1_BIT | PIN_RD_BIT | PIN_MREQ_BIT);
-                break;
-            case RD_SLTSL2:
-                // Direct PIO control: /SLTSL2=0, /RD=0, /MREQ=0 (Slot 1 remains 1 / inactive)
-                ctrl &= ~(PIN_SLTSL2_BIT | PIN_RD_BIT | PIN_MREQ_BIT);
-                break;
-            case RD_MEM:
-                ctrl &= ~(PIN_RD_BIT | PIN_MREQ_BIT);
-                break;
-            case RD_IO:
-                ctrl &= ~(PIN_RD_BIT | PIN_IORQ_BIT);
-                break;
-            default:
-                break;
-        }
-        return ctrl;
-    }
-
-    static inline uint32_t GetWriteCtrlMask(int cmd) {
-        uint32_t ctrl = CTRL_IDLE_BITS;
-        switch (cmd) {
-            case WR_SLTSL1:
-                // Direct PIO control: /SLTSL1=0, /WR=0, /MREQ=0
-                ctrl &= ~(PIN_SLTSL1_BIT | PIN_WR_BIT | PIN_MREQ_BIT);
-                break;
-            case WR_SLTSL2:
-                // Direct PIO control: /SLTSL2=0, /WR=0, /MREQ=0
-                ctrl &= ~(PIN_SLTSL2_BIT | PIN_WR_BIT | PIN_MREQ_BIT);
-                break;
-            case WR_MEM:
-                ctrl &= ~(PIN_WR_BIT | PIN_MREQ_BIT);
-                break;
-            case WR_IO:
-                ctrl &= ~(PIN_WR_BIT | PIN_IORQ_BIT);
-                break;
-            default:
-                break;
-        }
-        return ctrl;
-    }
-
-    static void DataBusHiZ(bool enable) {
-        for (uint i = 0; i < 8; i++) {
-            if (enable) {
-                gpio_set_oeover(i, GPIO_OVERRIDE_LOW);
-                gpio_set_input_enabled(i, true);
-                gpio_disable_pulls(i);
-            } else {
-                gpio_set_oeover(i, GPIO_OVERRIDE_NORMAL);
-            }
-        }
+        printf("[MsxBus] Hardware: SIO 74HC139+374, LVC4245, Waveshare GPIO remap\n");
     }
 
     static uint8_t ReadRaw(int cmd, uint16_t addr) {
-        uint32_t ctrl = GetReadCtrlMask(cmd);
-        ExecEntry(msxbus_offset_entry_read);
-        pio_sm_put_blocking(s_pio, s_sm, PackTx(addr, ctrl, 0));
-        (void)pio_sm_get_blocking(s_pio, s_sm); /* address latched */
-        DataBusHiZ(true);
-        pio_sm_put_blocking(s_pio, s_sm, 0); /* /RD, MODE=10 data */
-        (void)pio_sm_get_blocking(s_pio, s_sm); /* control held */
-        DELAY_NOPS(40);
+        SetAddress(addr);
+
+        SIO_GPIO_OE_CLR(PIN_DATA);
         gpio_barrier();
-        uint8_t data = (uint8_t)(SIO_GPIO_IN() & 0xFFu);
-        pio_sm_put_blocking(s_pio, s_sm, 0); /* restore */
-        msxbus_pio_wait_pull(s_pio, s_sm, s_offset);
-        DataBusHiZ(false);
+
+        /* 11→10 enables 4245. /WR low so DIR = cart → Pico. */
+        uint32_t clr = PIN_MODE0 | PIN_RD | PIN_WR;
+        switch (cmd) {
+            case RD_SLTSL1: clr |= PIN_MREQ | PIN_SLTSL1; break;
+            case RD_SLTSL2: clr |= PIN_MREQ | PIN_SLTSL2; break;
+            case RD_MEM:    clr |= PIN_MREQ; break;
+            case RD_IO:     clr |= PIN_IORQ; break;
+            default: break;
+        }
+        SIO_GPIO_CLR(clr);
+        gpio_barrier();
+
+        SYNC();
+        WaitReady();
+        uint8_t data = DataPi(SIO_GPIO_IN());
+
+        SIO_GPIO_SET(PIN_MODE | CTRL_IDLE);
+        SIO_GPIO_OE_SET(PIN_DATA);
+        gpio_barrier();
         return data;
     }
 
     static void Write(int cmd, uint16_t addr, uint8_t value) {
-        uint32_t ctrl = GetWriteCtrlMask(cmd);
-        ExecEntry(msxbus_offset_entry_write);
-        pio_sm_put_blocking(s_pio, s_sm, PackTx(addr, ctrl, value));
-        msxbus_pio_wait_pull(s_pio, s_sm, s_offset);
+        SetAddress(addr);
+
+        SIO_GPIO_OE_SET(PIN_DATA);
+        SIO_GPIO_CLR(PIN_DATA | PIN_MODE0);
+        SIO_GPIO_SET(DataHw(value));
+
+        uint32_t clr = 0;
+        switch (cmd) {
+            case WR_SLTSL1: clr = PIN_MREQ | PIN_SLTSL1; break;
+            case WR_SLTSL2: clr = PIN_MREQ | PIN_SLTSL2; break;
+            case WR_MEM:    clr = PIN_MREQ; break;
+            case WR_IO:     clr = PIN_IORQ; break;
+            default: break;
+        }
+        if (clr) {
+            SIO_GPIO_CLR(clr);
+        }
+        gpio_barrier();
+
+        /* /WR active-low pulse: assert (LOW), hold, then deassert (HIGH) to latch */
+        SIO_GPIO_CLR(PIN_WR);
+        DELAY_NOPS(PULSE_HIGH_NOPS);
+        SIO_GPIO_SET(PIN_WR);
+        gpio_barrier();
+
+        SYNC();
+        WaitReady();
+
+        SIO_GPIO_SET(PIN_MODE | CTRL_IDLE);
+        gpio_barrier();
     }
 
     static void Reset(int ms) {
@@ -210,13 +245,19 @@ namespace GpioHw {
         gpio_barrier();
     }
 
-    #undef PIN_MREQ_BIT
-    #undef PIN_IORQ_BIT
-    #undef PIN_RD_BIT
-    #undef PIN_WR_BIT
-    #undef PIN_SLTSL1_BIT
-    #undef PIN_SLTSL2_BIT
-    #undef CTRL_IDLE_BITS
+    #undef PIN_DATA
+    #undef PIN_MODE0
+    #undef PIN_MODE1
+    #undef PIN_MODE
+    #undef PIN_MREQ
+    #undef PIN_IORQ
+    #undef PIN_RD
+    #undef PIN_WR
+    #undef PIN_SLTSL1
+    #undef PIN_SLTSL2
+    #undef PIN_WAIT
+    #undef PIN_RESET
+    #undef CTRL_IDLE
 } // namespace GpioHw
 
 /* ==============================================================================

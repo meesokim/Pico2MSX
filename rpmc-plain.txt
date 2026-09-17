@@ -1,0 +1,232 @@
+from kicadbuilder import Part2, generate_kicad_files
+from skidl import Part, Pin, Net, Bus, KICAD, ERC, Circuit
+
+class Connector(Part):
+    def __init__(self, *args, **kwargs):
+        super().__init__(ref_prefix='C', **kwargs)
+        # 원하는 핀 번호와 이름으로 핀 추가
+        self.rmv_pins(*[i for i in range(1,31)])
+        gpios = [f'GPIO{i}' for i in range(21)]
+        gpios.extend(['3V3', 'GND', '5V'])
+        gpios.extend([f'GPIO{i}' for i in range(21,27)]) 
+        for ix, gpio in enumerate(gpios):
+            self += Pin(num=ix+1, name=gpio)
+
+if __name__=='__main__':
+    rpmc_plain = default_circuit
+    lvc4245 = Part2('SN74LVC4245APWR', footprint='jlcpcb:TSSOP-24_L7.8-W4.4-P0.65-LS6.4-BL', circuit=rpmc_plain)
+    latch1 = Part2('SN74HC374PWR', footprint='jlcpcb:TSSOP-20_L6.5-W4.4-P0.65-LS6.4-BL', circuit=rpmc_plain)
+    latch2 = Part2('SN74HC374PWR', footprint='jlcpcb:TSSOP-20_L6.5-W4.4-P0.65-LS6.4-BL', circuit=rpmc_plain)
+    dec1 = Part2('SN74HC139PWR', footprint='jlcpcb:TSSOP-16_L5.0-W4.4-P0.65-LS6.4-BL', circuit=rpmc_plain)
+    and_gate = Part2('SN74HC08PWRG4', footprint='jlcpcb:TSSOP-14_L5.0-W4.4-P0.65-LS6.4-BL', circuit=rpmc_plain)
+    rasp = Part2('RASPBERRY_PI_3_MODEL_B_', footprint='Connector_PinSocket_2.54mm:PinSocket_2x20_P2.54mm_Vertical', circuit=rpmc_plain)
+    audio = Part2('PJ-320D_C22459515', footprint='jlcpcb:AUDIO-SMD_HANELECTRICITY_PJ-320D', circuit=rpmc_plain)
+    pcm1808 = Part(lib='Connector_Generic', name='Conn_01x06', footprint='Connector_PinSocket_2.54mm:PinSocket_1x06_P2.54mm_Horizontal')
+    pcm_clk, pcm_fs, pcm_dout = [Net('PCM_CLK'), Net('PCM_FS'), Net('PCM_DOUT')]
+    pcm_din = Net('PCM_DIN')
+    pcm_mclk = Net('PCM_MCLK')
+    # pcm1808 = Part2('C55513') #PCM1808
+    # cap0 = Part2('C3343')
+    # cap1 = Part2('C3343')
+    # cap2 = Part2('C3343')
+    # capl = Part2('C3343')
+    # capr = Part2('C3343')
+    # print(cap0)
+    # === MSX Cartridge Connector (50-pin) ===
+    msx_conn = Part('msx_slot', 'CONN_MSXSLOT', value='SLTSL1', footprint='jlcpcb:MSX_SLOT', circuit=rpmc_plain)
+    msx_conn2 = Part('msx_slot', 'CONN_MSXSLOT', value='SLTSL2', footprint='jlcpcb:MSX_SLOT', circuit=rpmc_plain)
+    r0 = Part('Device', 'R', footprint='Resistor_SMD:R_0603_1608Metric', circuit=rpmc_plain)
+    r1 = Part('Device', 'R', footprint='Resistor_SMD:R_0603_1608Metric', circuit=rpmc_plain)
+    r2 = Part('Device', 'R', footprint='Resistor_SMD:R_0603_1608Metric', circuit=rpmc_plain)
+    led0 = Part('Device', 'LED', footprint='LED_SMD:LED_0603_1608Metric', circuit=rpmc_plain)
+    led1 = Part('Device', 'LED', footprint='LED_SMD:LED_0603_1608Metric', circuit=rpmc_plain)
+    led2 = Part('Device', 'LED', footprint='LED_SMD:LED_0603_1608Metric', circuit=rpmc_plain)
+
+    # Power nets
+    vcc3 = Net('VCC3V3')
+    vcc5 = Net('VCC5V')
+    gnd = Net('GND')
+    agnd = Net('AGND')
+
+    # Address/Data bus
+    bus = Bus('BUS', 8)
+    addr = Bus('A', 16)
+    data = Bus('DATA', 8)
+
+    # Control signals
+    mreq_n = Net('!MREQ')
+    iorq_n = Net('!IORQ')
+    rd_n = Net('!RD')
+    wr_n = Net('!WR')
+    sltsl = [Net('!SLTSL1'), Net('!SLTSL2')]
+    wait_n = Net('WAIT_N')
+    int_n = Net('INT_N')
+    cs1_n = Net('!CS1')
+    cs2_n = Net('!CS2')
+    cs12_n = Net('!CS12')
+    reset_n = Net('!RESET')
+    sw = [Net('SW1'), Net('SW2')]
+    ctrl = [Net('CTRL0'), Net('CTRL1')]
+    dat_en = Net('DAT_EN')
+    # dat_en1 = Net('DAT_EN1')
+    # dat_en2 = Net('DAT_EN2')
+    audio_left = Net('LEFT')
+    audio_right = Net('RIGHT')
+
+    # === Power Connections ===
+    vcc3 += rasp['3V3'], lvc4245['VCCB']
+    vcc5 += rasp['5V'], lvc4245['VCCA'], latch1['VCC'], latch2['VCC'], msx_conn['+5V'], msx_conn2['+5V'], and_gate['VCC'], dec1['VCC']
+    gnd += rasp['GND'], lvc4245['GND'], latch1['GND'], latch2['GND'], dec1['GND'], and_gate['GND'], msx_conn['GND'], msx_conn2['GND'], audio['1']
+
+    # Sound In
+    # scki = Net('SCKI')
+    # lrck = Net('LRCK')
+    # dout = Net('DOUT')
+    # bck = Net('BCK')
+    # vcc3 += pcm1808['VDD']
+    # vcc5 += pcm1808['VCC']
+    # gnd += pcm1808['AGND'], pcm1808['DGND'], pcm1808['MD0'], pcm1808['MD1'], pcm1808['FMT']
+
+    # === Sound PCM In ===
+    # scki += rasp['GPIO21']
+    # lrck += rasp['GPIO18']
+    # bck += rasp['GPIO19']
+    # dout += rasp['GPIO20']
+    # cap0['1'] += pcm1808['VREF']
+    # cap1['1'] += pcm1808['VCC']
+    # cap2['1'] += pcm1808['VDD']
+    # capl['1'] += audio_left
+    # capr['1'] += audio_right
+    # capl['2'] += pcm1808['VINL']
+    # capr['2'] += pcm1808['VINR']
+    # gnd += cap0['2'], cap1['2'], cap2['2']
+
+    # === Level Shifter (TXS0108E) ===
+    for i in range(8):
+        lvc4245[f'A{i+1}'] += data[i]    # 5V side (to latches)
+        lvc4245[f'B{i+1}'] += bus[i]     # 3.3V side (RP2040)   
+        rasp[f'GPIO{i}'] += bus[i]
+
+    dat_en += lvc4245['OE#']
+    
+    # === Latches (74HC374) ===
+    clk_low = Net('CLK_LOW')
+    clk_high = Net('CLK_HIGH')
+    # txs_oe = Net('TXS_OE')
+    # latch_oe_n = Net('LATCH_OE_N')
+    # latch_oe_n += latch1['OE#'], latch2['OE#'], gnd
+    for i in range(1,9):
+        latch1[f'{i}D'] += bus[i-1]
+        latch1[f'{i}Q'] += addr[i-1]
+
+    for i in range(1,9):
+        latch2[f'{i}D'] += bus[i-1]
+        latch2[f'{i}Q'] += addr[i+7]
+
+    # 74HC374 (edge trigger)
+    latch1['OE#'] += gnd
+    latch1['CLK'] += clk_low
+    latch2['OE#'] += gnd
+    latch2['CLK'] += clk_high
+
+    # LED
+    led0['A'] += r0['1']
+    led0['K'] += iorq_n
+    led1['A'] += r1['1']
+    led1['K'] += sltsl[0]
+    led2['A'] += r2['1']
+    led2['K'] += sltsl[1]
+    vcc3 += r0['2'], r1['2'], r2['2']
+
+    # === Control Signals ===
+    ctrl[0] += rasp['GPIO8']
+    ctrl[1] += rasp['GPIO9'] 
+    mreq_n += rasp['GPIO10']
+    iorq_n += rasp['GPIO11']
+    rd_n += rasp['GPIO12']
+    wr_n += rasp['GPIO13'], lvc4245['DIR']
+    sltsl[0] += rasp['GPIO14']
+    sltsl[1] += rasp['GPIO15']
+    wait_n += rasp['GPIO16']
+    int_n += rasp['GPIO17']
+    sw[0] += rasp['GPIO22']
+    sw[1] += rasp['GPIO23']
+    reset_n += rasp['GPIO24']
+
+    vcc3 += pcm1808['1']
+    gnd += pcm1808['2']
+    pcm_mclk += rasp['GPIO21'], pcm1808['3']
+    pcm_fs += rasp['GPIO19'], pcm1808['4']
+    pcm_din += rasp['GPIO20'], pcm1808['5']
+    pcm_clk += rasp['GPIO18'], pcm1808['6']
+
+    # === AND Gate for SLTSL_active_n ===
+    and_gate['1A'] += sltsl[0]
+    and_gate['1B'] += sltsl[1]
+    sltsl_active_n = Net('SLTSL_ACTIVE_N')
+    and_gate['1Y'] += sltsl_active_n
+
+    # === CS12_n = CS1_n AND CS2_n ===
+    and_gate['2A'] += cs1_n
+    and_gate['2B'] += cs2_n
+    and_gate['2Y'] += cs12_n
+    # and_gate['3A'] += dat_en1
+    # and_gate['3B'] += dat_en2
+    # and_gate['3Y'] += dat_en
+
+    # 74HC139 #1 - 래치 클럭 생성
+    dec1['1A','1B'] += ctrl
+    dec1['1#G'] += gnd
+    dec1['2#G'] += sltsl_active_n
+    dec1['1Y0'] += clk_low
+    dec1['1Y1'] += clk_high
+    dec1['1Y2'] += dat_en
+    # dec1['1Y3'] += dat_en2
+    dec1['2A'] += addr[14]
+    dec1['2B'] += addr[15]
+    dec1['2Y1'] += cs1_n
+    dec1['2Y2'] += cs2_n
+
+    for i in range(0,16):
+        msx_conn[f'A{i}'] += addr[i]   # A0-A15
+        msx_conn2[f'A{i}'] += addr[i]   # A0-A15
+        if i < 8:
+            msx_conn[f'D{i}'] += data[i]        # D0-D7
+            msx_conn2[f'D{i}'] += data[i]        # D0-D7
+
+    msx_conn['MREQ'] += mreq_n
+    msx_conn['IORQ'] += iorq_n
+    msx_conn['RD'] += rd_n
+    msx_conn['WR'] += wr_n
+    msx_conn['CS1'] += cs1_n
+    msx_conn['CS2'] += cs2_n
+    msx_conn['CS12'] += cs12_n
+    msx_conn['WAIT'] += wait_n
+    msx_conn['INT'] += int_n
+    msx_conn['SLTSL'] += sltsl[0]
+    msx_conn['GND'] += gnd
+    msx_conn['SW1'] += sw[0]
+    msx_conn['SW2'] += gnd
+    msx_conn['RESET'] += reset_n
+    msx_conn2['MREQ'] += mreq_n
+    msx_conn2['IORQ'] += iorq_n
+    msx_conn2['RD'] += rd_n
+    msx_conn2['WR'] += wr_n
+    msx_conn2['CS1'] += cs1_n
+    msx_conn2['CS2'] += cs2_n
+    msx_conn2['CS12'] += cs12_n
+    msx_conn2['WAIT'] += wait_n
+    msx_conn2['INT'] += int_n
+    msx_conn2['SLTSL'] += sltsl[1]
+    msx_conn2['GND'] += gnd
+    msx_conn2['SW1'] += sw[1]
+    msx_conn2['SW2'] += gnd
+    msx_conn2['RESET'] += reset_n
+    audio_left += msx_conn['SOUNDIN'], audio['4']
+    audio_right += msx_conn2['SOUNDIN'], audio['3']
+
+    ERC()
+    # === Generate Schematic ===
+    import sys
+    title = sys.argv[0].replace('.py', '')
+    generate_kicad_files(rpmc_plain, title)

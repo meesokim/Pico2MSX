@@ -1,17 +1,22 @@
 ;
 ; MSX Cartridge Bus — single PIO SM, separate read/write entry points
 ;
-; Fits in remaining PIO2 slots next to PSRAM SPI (~10 instr). Length = 22.
+; Hardware (rpmc-plain.txt): GPIO8/9 = 74HC139 1A/1B (active-low Y),
+; two 74HC374 (rising-edge CLK, /OE=GND), SN74LVC4245A between GPIO0-7 and D0-D7.
 ;
-; Side-set GPIO8=MODE0, GPIO9=MODE1 into a 2-to-4 selector. The selector
-; steers GPIO 0-7 and the 74HC373 LE of each latch:
-;   00  Idle
-;   01  Low address  (A0-A7)   — 373_low transparent
-;   11  High address (A8-A15)  — leaving 01 latches A0-A7; 373_high transparent
-;   10  Data         (D0-D7)   — leaving 11 latches A8-A15
+;   1B:1A (GPIO9:GPIO8)   139 Y (active 0)     374 / 4245
+;   00 (0b00)             1Y0=CLK_LOW          CLK_LOW low (A0-A7 setup while low)
+;   01 (0b01)             1Y1=CLK_HIGH         1Y0 rises (latch A0-A7), CLK_HIGH low (A8-A15 setup)
+;   11 (0b11)             1Y3=NC               1Y1 rises (latch A8-A15), IDLE (all clocks high, 4245 off)
+;   10 (0b10)             1Y2=DAT_EN           4245 /OE low (data bus active)
 ;
-; Put A_high only AFTER selecting 11. Do not float GPIO 0-7 while still on 11
-; (high 373 would follow a floating D). Switch 11→10 first, then Hi-Z.
+; Latch sequence:
+;   1. Output A0-A7 on GPIO0-7 with side 0b00 (CLK_LOW is LOW).
+;   2. Next instruction: change side to 0b01 (CLK_LOW rises 0->1, latching A0-A7; CLK_HIGH goes 1->0).
+;   3. Output A8-A15 on GPIO0-7 with side 0b01 (CLK_HIGH is LOW).
+;   4. Next instruction: change side to 0b11 (CLK_HIGH rises 0->1, latching A8-A15; IDLE).
+;
+; 4245 DIR is tied to /WR: H=B→A (Pico→cart), L=A→B (cart→Pico).
 ;
 ; TX word (shift-right, LSB first):
 ;   [7:0]   A0-A7
@@ -19,14 +24,12 @@
 ;   [31:16] GPIO 0-15 OUT image (data in [7:0], control in [15:10])
 ;
 ; CPU: wait until PC is at `common` (pull), exec jmp to entry_read/entry_write, then put.
-; Wrap returns to entry_read (set X=0, pull). Do not use pio_sm_is_exec_stalled —
-; that flag only tracks instructions written via SM_INSTR, not a program pull.
 ;
 
-.define public SIDE_IDLE       0b00
-.define public SIDE_LOW_ADDR   0b01
-.define public SIDE_DATA       0b10
-.define public SIDE_HIGH_ADDR  0b11
+.define public SIDE_LATCH_LOW   0b00  ; 1Y0=0 (CLK_LOW low),  1Y1=1 (CLK_HIGH high), 1Y2=1 (DAT_EN off)
+.define public SIDE_LATCH_HIGH  0b01  ; 1Y0=1 (CLK_LOW high), 1Y1=0 (CLK_HIGH low),  1Y2=1 (DAT_EN off)
+.define public SIDE_DATA        0b10  ; 1Y0=1 (CLK_LOW high), 1Y1=1 (CLK_HIGH high), 1Y2=0 (DAT_EN ON)
+.define public SIDE_IDLE        0b11  ; 1Y0=1 (CLK_LOW high), 1Y1=1 (CLK_HIGH high), 1Y2=1 (DAT_EN off)
 
 .program msxbus
 .side_set 2
@@ -39,27 +42,34 @@ public entry_write:
     set x, 1                    side SIDE_IDLE
 public common:
     pull block                  side SIDE_IDLE
-    out pins, 8                 side SIDE_IDLE [1]
-    nop                         side SIDE_LOW_ADDR [3]
-    out pins, 8                 side SIDE_HIGH_ADDR [1]
-    nop                         side SIDE_HIGH_ADDR [3]
-    mov y, osr                  side SIDE_HIGH_ADDR
-    jmp !x, do_read             side SIDE_HIGH_ADDR
-    out pins, 16                side SIDE_DATA [7]
-    nop                         side SIDE_DATA [7]
+    out pins, 8                 side SIDE_LATCH_LOW [1]   ; Output A0-A7 to GPIO0-7 while CLK_LOW is low
+    nop                         side SIDE_LATCH_HIGH [1]  ; CLK_LOW rises (latches A0-A7); CLK_HIGH goes low
+    out pins, 8                 side SIDE_LATCH_HIGH [1]  ; Output A8-A15 to GPIO0-7 while CLK_HIGH is low
+    nop                         side SIDE_IDLE [1]        ; CLK_HIGH rises (latches A8-A15); IDLE
+    mov y, osr                  side SIDE_IDLE
+    jmp !x, do_read             side SIDE_IDLE
+
+    ; --- Write Path ---
+    out pins, 16                side SIDE_IDLE [1]        ; Output write data (GPIO0-7) & control (GPIO10-15)
+    nop                         side SIDE_DATA [1]        ; Enable 4245 level shifter (DAT_EN /OE=0)
+    set pins, 0                 side SIDE_DATA [7]        ; Assert /WR (GPIO13=0) pulse while DAT_EN is active
+    set pins, 1                 side SIDE_DATA [1]        ; Deassert /WR (GPIO13=1)
     jmp restore                 side SIDE_IDLE
+
+    ; --- Read Path ---
 do_read:
-    ; 11→10 latches A8-A15, then CPU Hi-Z, then /RD held for SIO sample.
-    push block                  side SIDE_DATA
-    pull block                  side SIDE_DATA
-    mov osr, y                  side SIDE_DATA
-    out pins, 16                side SIDE_DATA [7]
-    push block                  side SIDE_DATA
-    pull block                  side SIDE_DATA
+    push block                  side SIDE_IDLE            ; Notify CPU that address is latched
+    pull block                  side SIDE_IDLE            ; CPU makes GPIO0-7 Hi-Z and sends token
+    mov osr, y                  side SIDE_IDLE
+    out pins, 16                side SIDE_IDLE [1]        ; Drive control signals (/RD, /MREQ, /SLTSL, /WR=0)
+    nop                         side SIDE_DATA [7]        ; Enable 4245 (DAT_EN /OE=0), wait ROM tACC
+    push block                  side SIDE_DATA            ; Notify CPU to sample data from GPIO0-7
+    pull block                  side SIDE_DATA            ; CPU finished sampling data and sends token
+
 restore:
-    mov osr, ~null              side SIDE_IDLE
-    out pins, 16                side SIDE_IDLE
-    out pindirs, 8              side SIDE_IDLE [2]
+    mov osr, ~null              side SIDE_IDLE            ; Disable 4245 (OE=1)
+    out pins, 16                side SIDE_IDLE            ; Deassert all control signals (GPIO10-15 all HIGH)
+    out pindirs, 8              side SIDE_IDLE [2]        ; Restore GPIO0-7 direction
 .wrap
 
 % c-sdk {
@@ -73,6 +83,7 @@ static inline void msxbus_pio_init(PIO pio, uint sm, uint offset) {
     sm_config_set_out_pins(&c, 0, 16);
     sm_config_set_in_pins(&c, 0);
     sm_config_set_sideset_pins(&c, 8);
+    sm_config_set_set_pins(&c, 13, 1);
 
     for (uint i = 0; i <= 15; i++) {
         pio_gpio_init(pio, i);
@@ -90,7 +101,7 @@ static inline void msxbus_pio_init(PIO pio, uint sm, uint offset) {
 
     pio_sm_init(pio, sm, offset, &c);
     pio_sm_set_consecutive_pindirs(pio, sm, 0, 16, true);
-    pio_sm_set_pins_with_mask(pio, sm, 0xFC00u, 0xFFFFu);
+    pio_sm_set_pins_with_mask(pio, sm, 0xFF00u, 0xFFFFu);
     pio_sm_set_enabled(pio, sm, true);
 }
 
